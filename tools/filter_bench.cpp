@@ -36,7 +36,7 @@ struct Strategy {
 };
 
 int main(int argc, char** argv) {
-    std::string data, out;
+    std::string data, out, only;  // --only FAMILY runs one predicate family
     size_t nq = 500;
     int threads = 4;
     for (int i = 1; i < argc; ++i) {
@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
         else if (a == "--nq") nq = std::stoul(argv[++i]);
         else if (a == "--threads") threads = std::stoi(argv[++i]);
         else if (a == "--out") out = argv[++i];
+        else if (a == "--only") only = argv[++i];
     }
     Graph g;
     load_arxiv_graph(data, g);
@@ -65,43 +66,63 @@ int main(int argc, char** argv) {
     const std::vector<Strategy> strategies = {
         {"prefilter", 0}, {"postfilter", 100}, {"postfilter", 1000}, {"inline", 100}};
 
-    // Runs every strategy for one predicate family. allow_for(qi) fills the
-    // bitmap + id list for query qi (the query paper is removed by caller).
-    auto run_family = [&](const std::string& family, const std::string& param,
-                          const std::function<void(size_t, std::vector<uint8_t>&, std::vector<uint32_t>&)>& allow_for) {
-        std::vector<std::vector<uint8_t>> allow(nq);
-        std::vector<std::vector<uint32_t>> ids(nq);
-        double sel = 0;
-        for (size_t qi = 0; qi < nq; ++qi) {
-            allow[qi].assign(n, 0);
-            allow_for(qi, allow[qi], ids[qi]);
-            uint32_t self = queries[qi];
-            if (allow[qi][self]) {
-                allow[qi][self] = 0;
-                ids[qi].erase(std::find(ids[qi].begin(), ids[qi].end(), self));
-            }
-            sel += double(ids[qi].size()) / double(n);
+    // Runs every strategy for one predicate family. fill(qi, bitmap, ids)
+    // builds the predicate; a static family (per_query = false) is built once
+    // and shared by all queries. (A first version kept a private copy per
+    // query: 500 x 169k ids = 340 MB on a laptop with <1 GB free, and the
+    // phase after each big brute-force scan ran up to 8x slow on page faults.)
+    // The query paper itself is excluded at search time, the same for every
+    // strategy, so the shared predicate is never modified.
+    auto run_family = [&](const std::string& family, const std::string& param, bool per_query,
+                          const std::function<void(size_t, std::vector<uint8_t>&, std::vector<uint32_t>&)>& fill) {
+        if (!only.empty() && family != only) return;
+        size_t sets = per_query ? nq : 1;
+        std::vector<std::vector<uint8_t>> allow(sets);
+        std::vector<std::vector<uint32_t>> ids(sets);
+        for (size_t i = 0; i < sets; ++i) {
+            allow[i].assign(n, 0);
+            fill(i, allow[i], ids[i]);
         }
+        auto set_of = [&](size_t qi) { return per_query ? qi : 0; };
+        double sel = 0;
+        for (size_t qi = 0; qi < nq; ++qi)
+            sel += double(ids[set_of(qi)].size() - allow[set_of(qi)][queries[qi]]) / double(n);
         sel /= double(nq);
+
+        auto prefilter = [&](size_t qi) {
+            uint32_t self = queries[qi];
+            const float* q = x.row(self);
+            Hits all;
+            for (uint32_t i : ids[set_of(qi)])
+                if (i != self) all.push_back({h.dist(i, q), i});
+            size_t kk = std::min(k, all.size());
+            std::partial_sort(all.begin(), all.begin() + long(kk), all.end());
+            all.resize(kk);
+            return all;
+        };
         // exact filtered answers
         std::vector<std::set<uint32_t>> truth(nq);
         for (size_t qi = 0; qi < nq; ++qi)
-            for (auto& hit : prefilter_search(h, x.row(queries[qi]), k, ids[qi])) truth[qi].insert(hit.second);
+            for (auto& hit : prefilter(qi)) truth[qi].insert(hit.second);
         for (const Strategy& s : strategies) {
             size_t found = 0, want = 0;
             uint64_t dists = 0;
             auto t = Clock::now();
             std::vector<Hits> res(nq);
             for (size_t qi = 0; qi < nq; ++qi) {
-                const float* q = x.row(queries[qi]);
+                uint32_t self = queries[qi];
+                const float* q = x.row(self);
+                const std::vector<uint8_t>& a = allow[set_of(qi)];
+                auto pass = [&](uint32_t id) { return a[id] && id != self; };
                 h.reset_distance_count();
                 if (s.name == "prefilter") {
-                    res[qi] = prefilter_search(h, q, k, ids[qi]);
-                    dists += ids[qi].size();
-                } else if (s.name == "postfilter") {
-                    res[qi] = postfilter_search(h, q, k, s.ef, allow[qi]);
-                } else {
-                    res[qi] = inline_search(h, q, k, s.ef, allow[qi]);
+                    res[qi] = prefilter(qi);
+                    dists += ids[set_of(qi)].size();
+                } else if (s.name == "postfilter") {  // = postfilter_search() in vector_hook.hpp
+                    for (auto& c : h.search(q, s.ef, s.ef))
+                        if (pass(c.second) && res[qi].size() < k) res[qi].push_back(c);
+                } else {  // = inline_search()
+                    res[qi] = h.search_filtered(q, k, s.ef, pass);
                 }
                 dists += h.distance_count();
             }
@@ -119,7 +140,7 @@ int main(int argc, char** argv) {
     };
 
     // ---- unfiltered baseline (only the query itself excluded) ----
-    run_family("none", "-", [&](size_t, auto& a, auto& ids) {
+    run_family("none", "-", false, [&](size_t, auto& a, auto& ids) {
         for (uint32_t i = 0; i < n; ++i) { a[i] = 1; ids.push_back(i); }
     });
 
@@ -131,7 +152,7 @@ int main(int argc, char** argv) {
         for (auto& v : bits) v = b(r2);
         char p[32];
         std::snprintf(p, sizeof p, "%g", s);
-        run_family("random", p, [&](size_t, auto& a, auto& ids) {
+        run_family("random", p, false, [&](size_t, auto& a, auto& ids) {
             for (uint32_t i = 0; i < n; ++i)
                 if ((a[i] = bits[i])) ids.push_back(i);
         });
@@ -149,7 +170,7 @@ int main(int argc, char** argv) {
             Result r = run_cypher(g, "MATCH (n:" + c.second + ") RETURN n.id");
             std::vector<uint32_t> base;
             for (auto& row : r.rows) base.push_back(uint32_t(row[0].as_int()));
-            run_family("category", c.second, [&](size_t, auto& a, auto& ids) {
+            run_family("category", c.second, false, [&](size_t, auto& a, auto& ids) {
                 ids = base;
                 for (uint32_t i : ids) a[i] = 1;
             });
@@ -161,7 +182,7 @@ int main(int argc, char** argv) {
         Result r = run_cypher(g, "MATCH (n:Paper) WHERE n.year >= " + std::to_string(y) + " RETURN n.id");
         std::vector<uint32_t> base;
         for (auto& row : r.rows) base.push_back(uint32_t(row[0].as_int()));
-        run_family("year", ">=" + std::to_string(y), [&](size_t, auto& a, auto& ids) {
+        run_family("year", ">=" + std::to_string(y), false, [&](size_t, auto& a, auto& ids) {
             ids = base;
             for (uint32_t i : ids) a[i] = 1;
         });
@@ -170,7 +191,7 @@ int main(int argc, char** argv) {
     // ---- graph neighbourhood of the query paper (correlated) ----
     {
         double cy_ms = 0;
-        run_family("graph", "2hop", [&](size_t qi, auto& a, auto& ids) {
+        run_family("graph", "2hop", true, [&](size_t qi, auto& a, auto& ids) {
             auto t = Clock::now();
             Result r = run_cypher(g, "MATCH (p:Paper {id: $P})-[:CITES*1..2]-(q) RETURN DISTINCT q.id",
                                   {{"P", Value(int64_t(queries[qi]))}});
