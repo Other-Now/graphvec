@@ -50,6 +50,7 @@ static std::string json(const Value& v) {
 int main(int argc, char** argv) {
     std::string data, query, qfile, out;
     bool explain = false, vectors = false;
+    int repeat = 1;  // -e: run the query this many times (profiling), report the last
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto val = [&] { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
         else if (a == "--out") out = val();
         else if (a == "--explain") explain = true;
         else if (a == "--vectors") vectors = true;
+        else if (a == "--repeat") repeat = std::stoi(val());
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
     if (data.empty()) { std::fprintf(stderr, "need --data DIR\n"); return 2; }
@@ -90,9 +92,13 @@ int main(int argc, char** argv) {
             for (size_t j = 0; j < feats.dim; ++j) q.emplace_back(double(feats.row(0)[j]));
             params["q"] = Value(q);
         }
-        auto t = Clock::now();
-        Result r = run_cypher(g, query, params, nullptr, vectors ? &hook : nullptr);
-        double ms = std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+        Result r;
+        double ms = 0;
+        for (int i = 0; i < repeat; ++i) {
+            auto t = Clock::now();
+            r = run_cypher(g, query, params, nullptr, vectors ? &hook : nullptr);
+            ms = std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+        }
         if (explain) std::cout << r.plan;
         for (size_t c = 0; c < r.columns.size(); ++c) std::cout << (c ? "\t" : "") << r.columns[c];
         std::cout << "\n";

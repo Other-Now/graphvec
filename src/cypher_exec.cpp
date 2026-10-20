@@ -638,12 +638,17 @@ private:
             std::unordered_map<std::vector<Value>, size_t, VecHash, VecEq> groups;
             std::vector<std::vector<Value>> gkeys;
             std::vector<std::vector<Agg>> states;
+            // One reused key buffer, and find() before inserting: emplace()
+            // builds (allocates) a node even when the group already exists,
+            // which made malloc/free the top of the profile.
+            std::vector<Value> key;
             auto sink = [&](const Row& r) {
-                std::vector<Value> key;
+                key.clear();
                 for (size_t c = 0; c < q.ret.size(); ++c)
                     if (!is_agg[c]) key.push_back(eval(q.ret[c].e, r));
-                auto [it, fresh] = groups.emplace(key, gkeys.size());
-                if (fresh) {
+                auto it = groups.find(key);
+                if (it == groups.end()) {
+                    it = groups.emplace(key, gkeys.size()).first;
                     gkeys.push_back(key);
                     states.emplace_back(q.ret.size());
                 }
@@ -710,7 +715,10 @@ private:
                 }
                 return false;
             };
-            std::stable_sort(out.begin(), out.end(), less);
+            // ORDER BY ... LIMIT k only needs the first skip+k rows in order.
+            size_t need = limit >= 0 ? size_t(skip + limit) : out.size();
+            if (need < out.size()) std::partial_sort(out.begin(), out.begin() + long(need), out.end(), less);
+            else std::stable_sort(out.begin(), out.end(), less);
         }
         for (int64_t i = skip; i < int64_t(out.size()); ++i) {
             if (limit >= 0 && i - skip >= limit) break;
