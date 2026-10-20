@@ -87,6 +87,31 @@ jobs:
           name: ann-${{ matrix.lib }}-${{ strategy.job-index }}
           path: "ann.csv\ncpu.txt"
 
+  # Cross-job QPS differs ~10% runner to runner, so the head-to-head runs
+  # both libraries alternately on one machine.
+  ann_ab:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ab]')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: data/sift.tar.gz, key: sift1m-v1 }
+      - name: data
+        run: |
+          mkdir -p data
+          [ -f data/sift.tar.gz ] || curl -sS --retry 5 -o data/sift.tar.gz ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz
+          tar xzf data/sift.tar.gz -C data
+      - name: bench
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4 --target ann_bench
+          lscpu | grep -E 'Model name|^CPU\(s\)' | tee cpu.txt
+          for lib in mine hnswlib mine hnswlib; do
+            ./build/ann_bench --sift data/sift --lib $lib --M 16 --efc 200 --threads 4 --out ab.csv
+          done
+          { echo '### SIFT1M same-runner A/B'; echo '```'; cat cpu.txt ab.csv; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: ann-ab, path: "ab.csv\ncpu.txt" }
+
   filter:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[filter]')
     runs-on: ubuntu-24.04
