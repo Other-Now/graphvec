@@ -120,8 +120,9 @@ Recall tracks hnswlib to the third decimal at every `ef` and at every build sett
 for M=32. That says the graphs are equivalent.
 
 **QPS needs care.** Each matrix job runs on a different runner, and a second CI run moved QPS by
-~10% (graphvec 6,639 → 5,984, hnswlib 6,120 → 5,739 at ef=80). So the cross-job table shows
-"same speed", not "faster than hnswlib". The `ann_ab` job alternates both libraries on one
+~10% (graphvec 6,639 → 5,984, hnswlib 6,120 → 5,739 at ef=80). That noise is as large as the
+real difference, so the table above cannot rank them; graphvec looking faster there is runner
+luck. The `ann_ab` job alternates both libraries on one
 machine, twice each ([`ann_sift1m_same_runner_ab.csv`](results/ci/ann_sift1m_same_runner_ab.csv)):
 
 | ef | graphvec QPS (run 1 / 2) | hnswlib QPS (run 1 / 2) | gap |
