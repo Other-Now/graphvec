@@ -19,7 +19,7 @@ jobs:
           ./build/wal_crash --trials 100 --dir /tmp/gv_crash_fsync --fsync | tee crash_fsync.json
           { echo '### WAL crash test'; echo '```'; cat crash.json crash_fsync.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Differential test: same 300 Cypher queries on graphvec and Memgraph.
+  # Differential test: same 520 Cypher queries on graphvec and Memgraph.
   difftest:
     runs-on: ubuntu-24.04
     steps:
@@ -32,7 +32,7 @@ jobs:
           [ -f data/arxiv.zip ] || curl -sSL --retry 5 -o data/arxiv.zip http://snap.stanford.edu/ogb/data/nodeproppred/arxiv.zip
           (cd data && python3 -m zipfile -e arxiv.zip .)
           python3 scripts/prep_arxiv.py data/arxiv data/arxiv_gv
-          python3 scripts/gen_queries.py data/arxiv_gv queries.cypher 15
+          python3 scripts/gen_queries.py data/arxiv_gv queries.cypher 20
       - name: memgraph
         run: |
           docker run -d --name mg -p 7687:7687 memgraph/memgraph:3.12.0 --log-level=WARNING
@@ -53,6 +53,7 @@ jobs:
 
   # SIFT1M: graphvec HNSW vs hnswlib vs FAISS, one build config per job.
   ann:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ann]')
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -87,6 +88,7 @@ jobs:
           path: "ann.csv\ncpu.txt"
 
   filter:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[filter]')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -108,10 +110,11 @@ jobs:
 
   chaos:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        run: ["kill", "stop", "etcd", "stop --unsafe", "kill --unsafe"]
+        run: ["kill", "stop", "etcd", "stop --unsafe", "kill --unsafe", "zombie", "zombie --unsafe", "khop"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -125,7 +128,17 @@ jobs:
         run: |
           set -- ${{ matrix.run }}
           name=chaos-$1${2:+-unsafe}
-          BUILD=$PWD/build ETCD_BIN=$PWD/etcd-v3.5.17-linux-amd64 bash scripts/chaos.sh $1 120 out/$name $2 || true
+          export BUILD=$PWD/build ETCD_BIN=$PWD/etcd-v3.5.17-linux-amd64 NICE="nice -n 10"
+          if [ "$1" = zombie ] || [ "$1" = khop ]; then
+            # zombie: 20 deterministic paused-leader rounds; khop: cross-shard BFS check
+            bash scripts/chaos.sh $1 20 out/$name $2
+            { echo "### $name"; echo '```'; cat out/$name/*.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$1" = zombie ] && [ -z "$2" ]; then grep -q '"stale_reads":0,"zombie_acked_writes":0,"lost_acked_writes":0' out/$name/zombie.json; fi
+            if [ "$1" = khop ]; then grep -q '"mismatches":0' out/$name/khop.json; fi
+            exit 0
+          fi
+          # unsafe runs do ~6x the ops (no etcd read per request): keep their history bounded
+          bash scripts/chaos.sh $1 $([ -n "$2" ] && echo 60 || echo 120) out/$name $2 || true
           python3 scripts/analyze_chaos.py out/$name | tee out/$name/summary.json
           { echo "### $name"; echo '```'; cat out/$name/summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           # the safe runs must be clean; the unsafe controls are expected to fail

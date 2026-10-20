@@ -38,6 +38,20 @@ TEMPLATES = [
     ("label_chain", "MATCH (a:{small})-[:CITES]->(b:{c2})-[:CITES]->(c:{small}) RETURN count(*)"),
     ("var_in", "MATCH (a:Paper {{id: {lowin}}})<-[:CITES*1..2]-(b) RETURN count(*), count(DISTINCT b)"),
     ("by_year", "MATCH (a:{c1}) WHERE a.year >= 2016 RETURN a.year AS y, count(*) AS n ORDER BY y"),
+    # the semantics most likely to differ between engines:
+    # two var-length hops in one pattern share relationship uniqueness
+    ("var_var", "MATCH (a:Paper {{id: {id}}})-[:CITES*1..2]->(b)-[:CITES*1..2]->(c) RETURN count(*), count(DISTINCT c)"),
+    # a var-length path that closes back on its (bound) start
+    ("var_cycle", "MATCH (a:Paper {{id: {mutual}}})-[:CITES*2..3]-(a) RETURN count(*)"),
+    # uniqueness across comma-separated parts: c cannot reuse a's edge into b
+    ("comma_shared", "MATCH (a:Paper {{id: {id}}})-[:CITES]->(b), (c)-[:CITES]->(b) WHERE c.year >= a.year "
+                     "RETURN count(*), count(DISTINCT c)"),
+    # untyped, undirected, 3 hops
+    ("untyped3", "MATCH (a:Paper {{id: {low}}})-[*1..3]-(b) RETURN count(*), count(DISTINCT b)"),
+    # label check on a var-length endpoint
+    ("var_label", "MATCH (a:Paper {{id: {id}}})-[:CITES*1..3]->(b:{c1}) RETURN count(*)"),
+    # arithmetic grouping key
+    ("arith_group", "MATCH (a:Paper {{id: {hub}}})<-[:CITES]-(b) RETURN b.year - a.year AS d, count(*) AS n ORDER BY d"),
 ]
 
 
