@@ -1,0 +1,1 @@
+{"run": "chaos-etcd", "faults": 11, "ops_ok": 151978, "ops_fail": 1772, "ops_info": 16, "ok_ops_per_s": 2533, "latency_ms_p50": 2.2, "latency_ms_p99": 10.58, "acked_unique_writes": 22860, "lost": 0, "wrong_value": 0, "checked_ops": 151986, "keys": 22875, "non_linearizable_keys": [], "ops": 153766, "pending_puts": 8, "result": "ok", "timed_out_keys": 0}

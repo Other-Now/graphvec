@@ -1,0 +1,10 @@
+round 0: leader r1 paused, failover 2227 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 1: leader r0 paused, failover 2186 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 2: leader r1 paused, failover 2211 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 3: leader r0 paused, failover 2190 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 4: leader r1 paused, failover 2202 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 5: leader r0 paused, failover 2180 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 6: leader r1 paused, failover 2181 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 7: leader r0 paused, failover 2209 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 8: leader r1 paused, failover 2183 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
+round 9: leader r0 paused, failover 2180 ms; zombie GET -> ERR NOTLEADER, PUT 3 -> ERR NOTLEADER, final VAL 2
