@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
         index->build(feats.data.data(), feats.rows, 4);
         std::fprintf(stderr, "built HNSW over %zu vectors in %.1f s\n", feats.rows,
                      std::chrono::duration<double>(Clock::now() - t0).count());
-        hook = make_vector_hook(*index, 64, 2000);
+        hook = make_vector_hook(*index, 64, 16000);  // prefilter below ~10% of 169k: the measured crossover (results/)
     }
 
     if (!query.empty()) {

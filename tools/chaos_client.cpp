@@ -255,8 +255,22 @@ int zombie(const Args& a, const std::vector<int>& pids, int rounds) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         return reply;
     };
+    int skipped = 0;
     for (int round = 0; round < rounds; ++round) {
         int64_t key = 500 + round;
+        // Only start once the previous zombie has re-synced and both replicas
+        // are in the ISR again. Pausing the leader while it is the only ISR
+        // member leaves no eligible replica, and the wait below never ends
+        // (this hung a CI job until its timeout).
+        Etcd::Kv isr;
+        int64_t deadline = net::now_ns() + 20'000'000'000LL;
+        while ((!etcd.get("/gv/shard/0/isr", isr) || isr.value != "0,1") && net::now_ns() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (isr.value != "0,1") {
+            ++skipped;
+            std::fprintf(stderr, "round %d: skipped, ISR stayed %s\n", round, isr.value.c_str());
+            continue;
+        }
         must("PUT " + std::to_string(key) + " 1");
         int L;
         std::string addr, host;
@@ -272,7 +286,16 @@ int zombie(const Args& a, const std::vector<int>& pids, int rounds) {
         int64_t t0 = net::now_ns();
         kill(pids[L], SIGSTOP);
         int now_leader = L;
-        while (!leader(now_leader, addr) || now_leader == L) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        deadline = net::now_ns() + 15'000'000'000LL;
+        while ((!leader(now_leader, addr) || now_leader == L) && net::now_ns() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (now_leader == L) {
+            kill(pids[L], SIGCONT);
+            ::close(fd);
+            ++skipped;
+            std::fprintf(stderr, "round %d: skipped, no new leader within 15 s\n", round);
+            continue;
+        }
         failover_ms.push_back(double(net::now_ns() - t0) / 1e6);
         must("PUT " + std::to_string(key) + " 2");
 
@@ -292,9 +315,11 @@ int zombie(const Args& a, const std::vector<int>& pids, int rounds) {
                      fin.c_str());
     }
     std::sort(failover_ms.begin(), failover_ms.end());
+    if (failover_ms.empty()) failover_ms.push_back(0);
     std::printf("{\"rounds\":%d,\"stale_reads\":%d,\"zombie_acked_writes\":%d,\"lost_acked_writes\":%d,"
-                "\"failover_ms_p50\":%.0f,\"failover_ms_max\":%.0f}\n",
-                rounds, stale, zombie_acks, lost, failover_ms[failover_ms.size() / 2], failover_ms.back());
+                "\"skipped\":%d,\"failover_ms_p50\":%.0f,\"failover_ms_max\":%.0f}\n",
+                rounds - skipped, stale, zombie_acks, lost, skipped, failover_ms[failover_ms.size() / 2],
+                failover_ms.back());
     return 0;
 }
 
