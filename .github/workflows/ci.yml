@@ -1,0 +1,137 @@
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4
+      - name: unit tests
+        run: ./build/unit_tests
+      - name: WAL kill -9 crash test
+        run: |
+          ./build/wal_crash --trials 300 --dir /tmp/gv_crash | tee crash.json
+          ./build/wal_crash --trials 100 --dir /tmp/gv_crash_fsync --fsync | tee crash_fsync.json
+          { echo '### WAL crash test'; echo '```'; cat crash.json crash_fsync.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  # Differential test: same 300 Cypher queries on graphvec and Memgraph.
+  difftest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: data/arxiv.zip, key: ogbn-arxiv-v1 }
+      - name: data
+        run: |
+          mkdir -p data
+          [ -f data/arxiv.zip ] || curl -sSL --retry 5 -o data/arxiv.zip http://snap.stanford.edu/ogb/data/nodeproppred/arxiv.zip
+          (cd data && python3 -m zipfile -e arxiv.zip .)
+          python3 scripts/prep_arxiv.py data/arxiv data/arxiv_gv
+          python3 scripts/gen_queries.py data/arxiv_gv queries.cypher 15
+      - name: memgraph
+        run: |
+          docker run -d --name mg -p 7687:7687 memgraph/memgraph:3.12.0 --log-level=WARNING
+          pip install neo4j==5.28.1
+          python3 scripts/memgraph_run.py data/arxiv_gv queries.cypher memgraph.jsonl
+      - name: graphvec
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4 --target gvsh
+          ./build/gvsh --data data/arxiv_gv --queries queries.cypher --out ours.jsonl
+      - name: diff
+        run: |
+          python3 scripts/diff_results.py ours.jsonl memgraph.jsonl diff.md; rc=$?
+          { echo '### Differential test vs Memgraph 3.12.0'; cat diff.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: difftest, path: "queries.cypher\nours.jsonl\nmemgraph.jsonl\ndiff.md" }
+
+  # SIFT1M: graphvec HNSW vs hnswlib vs FAISS, one build config per job.
+  ann:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        lib: [mine, hnswlib, faiss]
+        cfg: ["16 200", "8 200", "32 200", "16 100", "16 400"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: data/sift.tar.gz, key: sift1m-v1 }
+      - name: data
+        run: |
+          mkdir -p data
+          [ -f data/sift.tar.gz ] || curl -sS --retry 5 -o data/sift.tar.gz ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz
+          tar xzf data/sift.tar.gz -C data
+      - name: build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4 --target ann_bench
+      - name: bench
+        run: |
+          set -- ${{ matrix.cfg }}
+          lscpu | grep -E 'Model name|^CPU\(s\)' > cpu.txt
+          if [ "${{ matrix.lib }}" = faiss ]; then
+            pip install faiss-cpu==1.11.0 numpy
+            python3 scripts/faiss_bench.py --sift data/sift --M $1 --efc $2 --threads 4 --out ann.csv
+          else
+            ./build/ann_bench --sift data/sift --lib ${{ matrix.lib }} --M $1 --efc $2 --threads 4 --out ann.csv
+          fi
+          cat cpu.txt ann.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ann-${{ matrix.lib }}-${{ strategy.job-index }}
+          path: "ann.csv\ncpu.txt"
+
+  filter:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with: { path: data/arxiv.zip, key: ogbn-arxiv-v1 }
+      - name: data
+        run: |
+          mkdir -p data
+          [ -f data/arxiv.zip ] || curl -sSL --retry 5 -o data/arxiv.zip http://snap.stanford.edu/ogb/data/nodeproppred/arxiv.zip
+          (cd data && python3 -m zipfile -e arxiv.zip .)
+          python3 scripts/prep_arxiv.py data/arxiv data/arxiv_gv
+      - name: bench
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4 --target filter_bench
+          ./build/filter_bench --data data/arxiv_gv --nq 500 --threads 4 --out filter.csv
+          { echo '### Filtered search (ogbn-arxiv)'; echo '```'; cat filter.csv; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: filter, path: filter.csv }
+
+  chaos:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ["kill", "stop", "etcd", "stop --unsafe", "kill --unsafe"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - name: build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j4 --target shardd chaos_client
+          (cd checker && go build -o ../build/checker .)
+          curl -sSL https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz | tar xz
+      - name: chaos
+        run: |
+          set -- ${{ matrix.run }}
+          name=chaos-$1${2:+-unsafe}
+          BUILD=$PWD/build ETCD_BIN=$PWD/etcd-v3.5.17-linux-amd64 bash scripts/chaos.sh $1 120 out/$name $2 || true
+          python3 scripts/analyze_chaos.py out/$name | tee out/$name/summary.json
+          { echo "### $name"; echo '```'; cat out/$name/summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # the safe runs must be clean; the unsafe controls are expected to fail
+          if [ -z "$2" ]; then python3 -c "import json,sys; s=json.load(open('out/$name/summary.json')); sys.exit(0 if s['lost']==0 and s['wrong_value']==0 and s['result']=='ok' else 1)"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-${{ strategy.job-index }}
+          path: out/

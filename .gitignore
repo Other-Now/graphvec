@@ -1,0 +1,8 @@
+build/
+data/
+results/raw/
+*.jsonl
+!results/**/*.jsonl
+checker/checker-linux
+checker/checker
+__pycache__/
