@@ -1,6 +1,9 @@
 // ann_bench: graphvec HNSW vs hnswlib on SIFT (TEXMEX .fvecs), same harness.
 //   ann_bench --sift DIR --lib mine|hnswlib [--n 1000000] [--nq 10000] [--M 16]
 //             [--efc 200] [--threads 4] [--ef 10,20,40,80,160,320] [--out f.csv]
+//             [--perf-ctl FIFO]
+// --perf-ctl writes enable/disable to a `perf stat|record --control fifo:FIFO`
+// control pipe around the timed search loop, so counters cover search only.
 // With --n below 1M the ground truth is recomputed by brute force over the
 // subset (the shipped ivecs is for the full 1M base).
 #include "graphvec/dataset.hpp"
@@ -34,7 +37,7 @@ static double rss_mb() {
 static double secs(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
 
 int main(int argc, char** argv) {
-    std::string sift, lib = "mine", out, efs = "10,20,40,80,160,320";
+    std::string sift, lib = "mine", out, efs = "10,20,40,80,160,320", perf_ctl;
     size_t n = 1000000, nq = 10000;
     int M = 16, efc = 200, threads = 4;
     for (int i = 1; i < argc; ++i) {
@@ -49,7 +52,12 @@ int main(int argc, char** argv) {
         else if (a == "--threads") threads = std::stoi(val());
         else if (a == "--ef") efs = val();
         else if (a == "--out") out = val();
+        else if (a == "--perf-ctl") perf_ctl = val();
     }
+    std::FILE* ctl = perf_ctl.empty() ? nullptr : std::fopen(perf_ctl.c_str(), "w");
+    auto perf = [&](const char* cmd) {
+        if (ctl) { std::fputs(cmd, ctl); std::fflush(ctl); }
+    };
     Matrix base = read_fvecs(sift + "/sift_base.fvecs", n);
     Matrix query = read_fvecs(sift + "/sift_query.fvecs", nq);
     n = base.rows;
@@ -112,6 +120,7 @@ int main(int argc, char** argv) {
         if (mine) mine->reset_distance_count();
         else theirs->setEf(size_t(ef));
         std::vector<int32_t> res(nq * k, -1);
+        perf("enable\n");
         auto t = Clock::now();
         for (size_t q = 0; q < nq; ++q) {
             int32_t* r = &res[q * k];
@@ -123,15 +132,18 @@ int main(int argc, char** argv) {
             }
         }
         double el = secs(t);
+        perf("disable\n");
         size_t hit = 0;  // recall is scored outside the timed loop
         for (size_t q = 0; q < nq; ++q) {
             std::set<int32_t> truth(gt[q].begin(), gt[q].begin() + long(k));
             for (size_t j = 0; j < k; ++j) hit += truth.count(res[q * k + j]);
         }
-        double dpq = mine ? double(mine->distance_count()) / double(nq)
-                          : double(theirs->metric_distance_computations.exchange(0)) / double(nq);
-        std::fprintf(f, "%s,%zu,%d,%d,%d,%.2f,%.0f,%d,%.4f,%.0f,%.0f\n", lib.c_str(), n, M, efc, threads, build_s,
-                     mem, ef, double(hit) / double(nq * k), double(nq) / el, dpq);
+        // hnswlib's own counter only counts upper-layer hops, so it is not
+        // comparable; leave the column empty for it.
+        double dpq = mine ? double(mine->distance_count()) / double(nq) : 0;
+        std::string dcol = mine ? std::to_string(int64_t(dpq)) : "";
+        std::fprintf(f, "%s,%zu,%d,%d,%d,%.2f,%.0f,%d,%.4f,%.0f,%s\n", lib.c_str(), n, M, efc, threads, build_s,
+                     mem, ef, double(hit) / double(nq * k), double(nq) / el, dcol.c_str());
         std::fflush(f);
     }
     if (f != stdout) std::fclose(f);

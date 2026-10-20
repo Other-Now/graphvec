@@ -17,6 +17,9 @@ BUILD=${BUILD:-$HOME/gv-build/rel}
 ETCD_BIN=${ETCD_BIN:-$HOME/gv-tools/etcd-v3.5.17-linux-amd64}
 CHECKER=${CHECKER:-$BUILD/checker}
 TTL=${TTL:-2}
+# On a 4-vCPU CI runner the unthrottled cluster can starve the runner agent
+# (two jobs were cancelled mid-run); NICE="nice -n 10" leaves it some CPU.
+NICE=${NICE:-}
 W=$(mktemp -d /tmp/gvchaos.XXXX)
 rm -rf "$OUT"; mkdir -p "$OUT/logs"
 EPS=127.0.0.1:2379,127.0.0.1:2389,127.0.0.1:2399
@@ -28,7 +31,7 @@ etcdctl() { "$ETCD_BIN/etcdctl" --endpoints=$EPS "$@"; }
 
 start_etcd() {  # $1 = member index
   local i=$1 c=$((2379 + $1 * 10)) p=$((2380 + $1 * 10))
-  "$ETCD_BIN/etcd" --name e$i --data-dir "$W/etcd$i" \
+  $NICE "$ETCD_BIN/etcd" --name e$i --data-dir "$W/etcd$i" \
     --listen-client-urls http://127.0.0.1:$c --advertise-client-urls http://127.0.0.1:$c \
     --listen-peer-urls http://127.0.0.1:$p --initial-advertise-peer-urls http://127.0.0.1:$p \
     --initial-cluster $CLUSTER --initial-cluster-state new --initial-cluster-token gv \
@@ -39,7 +42,7 @@ start_etcd() {  # $1 = member index
 start_replica() {  # $1 = shard, $2 = replica
   local s=$1 r=$2
   local port=$((7100 + s * 10 + r)) peer=$((7100 + s * 10 + 1 - r))
-  "$BUILD/shardd" --shard $s --replica $r --port $port --peer 127.0.0.1:$peer --etcd $EPS \
+  $NICE "$BUILD/shardd" --shard $s --replica $r --port $port --peer 127.0.0.1:$peer --etcd $EPS \
     --data "$W/s${s}r${r}" --ttl $TTL $UNSAFE >>"$OUT/logs/s${s}r${r}.log" 2>&1 &
   PID[s${s}r${r}]=$!
 }
@@ -66,7 +69,7 @@ if [ "$FAULT" = zombie ]; then  # deterministic paused-leader test on shard 0; D
   exit 0
 fi
 
-"$BUILD/chaos_client" run --etcd $EPS --shards 2 --clients 8 --duration "$DUR" \
+$NICE "$BUILD/chaos_client" run --etcd $EPS --shards 2 --clients 8 --duration "$DUR" \
   --history "$OUT/history.jsonl" >"$OUT/client.json" &
 CLIENT=$!
 
@@ -92,7 +95,7 @@ while [ "$(date +%s)" -lt "$END" ] && [ "$FAULT" != none ]; do
       sleep 2
       # rejoin the existing cluster with the same data dir
       c=$((2379 + i * 10)); p=$((2380 + i * 10))
-      "$ETCD_BIN/etcd" --name e$i --data-dir "$W/etcd$i" \
+      $NICE "$ETCD_BIN/etcd" --name e$i --data-dir "$W/etcd$i" \
         --listen-client-urls http://127.0.0.1:$c --advertise-client-urls http://127.0.0.1:$c \
         --listen-peer-urls http://127.0.0.1:$p --initial-advertise-peer-urls http://127.0.0.1:$p \
         --initial-cluster $CLUSTER --initial-cluster-state existing \
